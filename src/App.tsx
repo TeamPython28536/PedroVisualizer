@@ -1290,6 +1290,8 @@ export function App() {
   const animationFrameRef = useRef<number | null>(null)
   const lastFrameRef = useRef<number | null>(null)
   const dragStartRef = useRef<{ point: Point; pointer: Point } | null>(null)
+  const historyBatchStartRef = useRef<PedroPathFile | null>(null)
+  const historyBatchDirtyRef = useRef(false)
   const hasInitializedSessionSaveRef = useRef(false)
 
   const selectedLineIndex = useMemo(() => {
@@ -1504,19 +1506,55 @@ export function App() {
     routeSamples.totalDistance,
   ])
 
-  function updatePathFile(updater: (current: PedroPathFile) => PedroPathFile) {
+  function updatePathFile(
+    updater: (current: PedroPathFile) => PedroPathFile,
+    options: { recordHistory?: boolean } = {}
+  ) {
     setPathFile((current) => {
       if (!current) {
         return current
       }
       const next = updater(current)
       if (next !== current) {
-        setPast((p) =>
-          p.length >= 100 ? [...p.slice(-99), current] : [...p, current]
-        )
-        setFuture([])
+        if (options.recordHistory === false) {
+          historyBatchDirtyRef.current = true
+        } else {
+          setPast((p) =>
+            p.length >= 100 ? [...p.slice(-99), current] : [...p, current]
+          )
+          setFuture([])
+        }
       }
       return next
+    })
+  }
+
+  function beginHistoryBatch() {
+    historyBatchStartRef.current = pathFile
+    historyBatchDirtyRef.current = false
+  }
+
+  function commitHistoryBatch() {
+    const batchStart = historyBatchStartRef.current
+    const batchDirty = historyBatchDirtyRef.current
+
+    historyBatchStartRef.current = null
+    historyBatchDirtyRef.current = false
+
+    if (!batchStart || !batchDirty) {
+      return
+    }
+
+    setPathFile((current) => {
+      if (!current || current === batchStart) {
+        return current
+      }
+
+      setPast((p) =>
+        p.length >= 100 ? [...p.slice(-99), batchStart] : [...p, batchStart]
+      )
+      setFuture([])
+      return current
     })
   }
 
@@ -1696,13 +1734,20 @@ export function App() {
     })
   }
 
-  function updateLine(lineId: string, updater: (line: PathLine) => PathLine) {
-    updatePathFile((current) => ({
-      ...current,
-      lines: current.lines.map((line) =>
-        line.id === lineId ? updater(line) : line
-      ),
-    }))
+  function updateLine(
+    lineId: string,
+    updater: (line: PathLine) => PathLine,
+    options?: { recordHistory?: boolean }
+  ) {
+    updatePathFile(
+      (current) => ({
+        ...current,
+        lines: current.lines.map((line) =>
+          line.id === lineId ? updater(line) : line
+        ),
+      }),
+      options
+    )
   }
 
   function updateSetting(key: string, value: unknown) {
@@ -1778,41 +1823,56 @@ export function App() {
     return line.controlPoints[target.index] ?? null
   }
 
-  function setPointForTarget(target: PointDragTarget, point: Point) {
+  function setPointForTarget(
+    target: PointDragTarget,
+    point: Point,
+    options?: { recordHistory?: boolean }
+  ) {
     const nextPoint = snapFieldPoint(point)
 
     if (target.kind === "start") {
-      updatePathFile((current) => ({
-        ...current,
-        startPoint: {
-          ...current.startPoint,
-          ...nextPoint,
-        },
-      }))
+      updatePathFile(
+        (current) => ({
+          ...current,
+          startPoint: {
+            ...current.startPoint,
+            ...nextPoint,
+          },
+        }),
+        options
+      )
       return
     }
 
-    updateLine(target.lineId, (line) => {
-      if (target.kind === "end") {
+    updateLine(
+      target.lineId,
+      (line) => {
+        if (target.kind === "end") {
+          return {
+            ...line,
+            endPoint: {
+              ...line.endPoint,
+              ...nextPoint,
+            },
+          }
+        }
+
         return {
           ...line,
-          endPoint: {
-            ...line.endPoint,
-            ...nextPoint,
-          },
+          controlPoints: line.controlPoints.map((controlPoint, index) =>
+            index === target.index ? nextPoint : controlPoint
+          ),
         }
-      }
-
-      return {
-        ...line,
-        controlPoints: line.controlPoints.map((controlPoint, index) =>
-          index === target.index ? nextPoint : controlPoint
-        ),
-      }
-    })
+      },
+      options
+    )
   }
 
-  function setRotationForTarget(target: RotationDragTarget, pointer: Point) {
+  function setRotationForTarget(
+    target: RotationDragTarget,
+    pointer: Point,
+    options?: { recordHistory?: boolean }
+  ) {
     if (!pathFile) {
       return
     }
@@ -1821,20 +1881,23 @@ export function App() {
       const degrees = snapDegrees(
         pointHeadingDegrees(pathFile.startPoint, pointer)
       )
-      updatePathFile((current) => ({
-        ...current,
-        startPoint: {
-          ...current.startPoint,
-          degrees,
-          startDeg: degrees,
-          endDeg: degrees,
-        },
-        lines: current.lines.map((line, i) =>
-          i === 0
-            ? { ...line, endPoint: { ...line.endPoint, startDeg: degrees } }
-            : line
-        ),
-      }))
+      updatePathFile(
+        (current) => ({
+          ...current,
+          startPoint: {
+            ...current.startPoint,
+            degrees,
+            startDeg: degrees,
+            endDeg: degrees,
+          },
+          lines: current.lines.map((line, i) =>
+            i === 0
+              ? { ...line, endPoint: { ...line.endPoint, startDeg: degrees } }
+              : line
+          ),
+        }),
+        options
+      )
       return
     }
 
@@ -1846,23 +1909,26 @@ export function App() {
     }
 
     const degrees = snapDegrees(pointHeadingDegrees(line.endPoint, pointer))
-    updatePathFile((current) => {
-      const idx = current.lines.findIndex((l) => l.id === target.lineId)
-      if (idx === -1) return current
-      const lines = current.lines.map((l, i) => {
-        if (i === idx) {
-          return {
-            ...l,
-            endPoint: { ...l.endPoint, degrees, endDeg: degrees },
+    updatePathFile(
+      (current) => {
+        const idx = current.lines.findIndex((l) => l.id === target.lineId)
+        if (idx === -1) return current
+        const lines = current.lines.map((l, i) => {
+          if (i === idx) {
+            return {
+              ...l,
+              endPoint: { ...l.endPoint, degrees, endDeg: degrees },
+            }
           }
-        }
-        if (i === idx + 1) {
-          return { ...l, endPoint: { ...l.endPoint, startDeg: degrees } }
-        }
-        return l
-      })
-      return { ...current, lines }
-    })
+          if (i === idx + 1) {
+            return { ...l, endPoint: { ...l.endPoint, startDeg: degrees } }
+          }
+          return l
+        })
+        return { ...current, lines }
+      },
+      options
+    )
   }
 
   function revealPointTools(
@@ -2079,6 +2145,7 @@ export function App() {
       svgRef.current?.setPointerCapture(event.pointerId)
       setDragTarget(target)
       dragStartRef.current = null
+      beginHistoryBatch()
 
       if (isPointDragTarget(target)) {
         const targetPoint = getPointForTarget(target, pathFile)
@@ -2142,7 +2209,7 @@ export function App() {
     }
 
     if (!isPointDragTarget(dragTarget)) {
-      setRotationForTarget(dragTarget, point)
+      setRotationForTarget(dragTarget, point, { recordHistory: false })
       return
     }
 
@@ -2162,17 +2229,18 @@ export function App() {
             : dragStartRef.current.point.y + delta.y,
       }
 
-      setPointForTarget(dragTarget, nextPoint)
+      setPointForTarget(dragTarget, nextPoint, { recordHistory: false })
       return
     }
 
-    setPointForTarget(dragTarget, point)
+    setPointForTarget(dragTarget, point, { recordHistory: false })
   }
 
   function handlePointerUp(event: React.PointerEvent<SVGElement>) {
     if (dragTarget && svgRef.current?.hasPointerCapture(event.pointerId)) {
       svgRef.current.releasePointerCapture(event.pointerId)
     }
+    commitHistoryBatch()
     setDragTarget(null)
     dragStartRef.current = null
   }
