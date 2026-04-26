@@ -41,6 +41,64 @@ Output goes to `dist/`.
   `BezierLine` / `BezierCurve` plus `setLinearHeadingInterpolation` chained
   through `pathBuilder()`, one block per chain.
 
+## Sync to your robot codebase
+
+Instead of copy-pasting export output every time, run the sync server
+inside your robot code repo:
+
+```
+bun run sync path/to/Auto.java
+```
+
+(or `Auto.kt` — language is picked from the file extension). It listens on
+`http://localhost:7777`. In the visualizer, click **Sync** in the header
+and hit **Sync now**.
+
+In the target file, mark the region you want overwritten:
+
+```java
+// VISUALIZER_PATH_BEGIN
+// VISUALIZER_PATH_END
+```
+
+Java template:
+
+```java
+public class AutoPaths {
+  // VISUALIZER_PATH_BEGIN
+  public static class Paths {
+    public static void init(Follower follower, boolean isRed) {
+
+    }
+  }
+  // VISUALIZER_PATH_END
+}
+```
+
+Kotlin template:
+
+```kotlin
+class AutoPaths {
+  // VISUALIZER_PATH_BEGIN
+  companion object Paths {
+    fun init(follower: Follower, isRed: Boolean) {
+
+    }
+  }
+  // VISUALIZER_PATH_END
+}
+```
+
+The sync server rewrites whatever sits between `BEGIN`/`END`, preserving
+the indentation of the marker line. It writes the full generated path code
+block (all chains together) in one replace, and leaves everything outside
+the markers untouched. In practice, put markers around the whole
+`Paths` companion/static object so sync can safely add/remove generated
+path fields and path chains over time.
+
+If the marker pair is missing, sync fails with a hint and the file is not
+changed.
+
 ## Heading convention
 
 Each waypoint stores a `startDeg` (heading entering) and `endDeg` (heading

@@ -5,6 +5,7 @@ import {
   RiArrowGoBackLine,
   RiArrowGoForwardLine,
   RiCodeSSlashLine,
+  RiRefreshLine,
   RiDeleteBin6Line,
   RiDownload2Line,
   RiDragMove2Line,
@@ -31,7 +32,13 @@ import {
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
-function Tip({ label, children }: { label: ReactNode; children: ReactElement }) {
+function Tip({
+  label,
+  children,
+}: {
+  label: ReactNode
+  children: ReactElement
+}) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -784,12 +791,12 @@ function fmtDeg(n: number): string {
 
 type CodeLang = "java" | "kotlin"
 
-function buildPathCode(file: PedroPathFile, lang: CodeLang): string {
+function buildChainCode(file: PedroPathFile, lang: CodeLang) {
   const chains = (file.pathChains ?? []).filter((c) => c.lineIds.length > 0)
   const usedNames = new Set<string>()
   const chainIdent: Record<string, string> = {}
   for (const chain of chains) {
-    let base = toIdentifier(chain.name || "Chain", true) || "Chain"
+    const base = toIdentifier(chain.name || "Chain", true) || "Chain"
     let name = base
     let i = 2
     while (usedNames.has(name)) {
@@ -809,7 +816,6 @@ function buildPathCode(file: PedroPathFile, lang: CodeLang): string {
 
   const stmtTerm = lang === "java" ? ";" : ""
   const newKw = lang === "java" ? "new " : ""
-
   const mirrorArg = lang === "java" ? ", isRed" : ""
 
   function poseCall(p: Point): string {
@@ -820,7 +826,7 @@ function buildPathCode(file: PedroPathFile, lang: CodeLang): string {
     return `heading(${fmtDeg(deg)}${mirrorArg})`
   }
 
-  function buildChainBlock(chain: PathChain): string {
+  function chainBlock(chain: PathChain): string {
     const ident = chainIdent[chain.id]!
     const parts: string[] = []
     chain.lineIds.forEach((lineId, segIdx) => {
@@ -851,15 +857,21 @@ function buildPathCode(file: PedroPathFile, lang: CodeLang): string {
         heading = `.setLinearHeadingInterpolation(${headingCall(startDeg)}, ${headingCall(endDeg)})`
       }
 
-      const prefix = segIdx === 0
-        ? `            ${ident} = follower.pathBuilder().addPath(`
-        : `.addPath(`
+      const prefix =
+        segIdx === 0
+          ? `            ${ident} = follower.pathBuilder().addPath(`
+          : `.addPath(`
       parts.push(`${prefix}\n                ${curve}\n            )${heading}`)
     })
     return parts.join("") + `.build()${stmtTerm}`
   }
 
-  const chainBlocks = chains.map(buildChainBlock).join("\n\n")
+  return { chains, chainIdent, chainBlock }
+}
+
+function buildPathCode(file: PedroPathFile, lang: CodeLang): string {
+  const { chains, chainIdent, chainBlock } = buildChainCode(file, lang)
+  const chainBlocks = chains.map(chainBlock).join("\n\n")
   const fieldSize = fmtNum(FIELD_SIZE)
 
   if (lang === "kotlin") {
@@ -1075,6 +1087,55 @@ export function App() {
   const [future, setFuture] = useState<PedroPathFile[]>([])
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement | null>(null)
+  const [syncMenuOpen, setSyncMenuOpen] = useState(false)
+  const syncMenuRef = useRef<HTMLDivElement | null>(null)
+  const [syncUrl, setSyncUrl] = useState<string>(() => {
+    try {
+      return (
+        localStorage.getItem("visualizer.syncUrl") || "http://localhost:7777"
+      )
+    } catch {
+      return "http://localhost:7777"
+    }
+  })
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncStatus, setSyncStatus] = useState<{
+    kind: "ok" | "err"
+    text: string
+  } | null>(null)
+  useEffect(() => {
+    try {
+      localStorage.setItem("visualizer.syncUrl", syncUrl)
+    } catch {
+      /* no storage */
+    }
+  }, [syncUrl])
+
+  const syncIndicator = useMemo(() => {
+    if (syncBusy) {
+      return {
+        label: "Syncing",
+        className: "border-amber-500/40 bg-amber-500/10 text-amber-700",
+      }
+    }
+    if (syncStatus?.kind === "ok") {
+      return {
+        label: "Synced",
+        className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700",
+      }
+    }
+    if (syncStatus?.kind === "err") {
+      return {
+        label: "Sync error",
+        className: "border-destructive/40 bg-destructive/10 text-destructive",
+      }
+    }
+    return {
+      label: "Not synced",
+      className: "border-border bg-muted/40 text-muted-foreground",
+    }
+  }, [syncBusy, syncStatus])
+
   const [fileName, setFileName] = useState("demo.pp")
   const [selectedLineId, setSelectedLineId] = useState<string | null>(
     demoPath.lines[0]?.id ?? null
@@ -1322,6 +1383,20 @@ export function App() {
     window.addEventListener("mousedown", onClick)
     return () => window.removeEventListener("mousedown", onClick)
   }, [exportMenuOpen])
+
+  useEffect(() => {
+    if (!syncMenuOpen) return
+    function onClick(e: MouseEvent) {
+      if (
+        syncMenuRef.current &&
+        !syncMenuRef.current.contains(e.target as Node)
+      ) {
+        setSyncMenuOpen(false)
+      }
+    }
+    window.addEventListener("mousedown", onClick)
+    return () => window.removeEventListener("mousedown", onClick)
+  }, [syncMenuOpen])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -2097,6 +2172,52 @@ export function App() {
     downloadText(safeName, `${JSON.stringify(output, null, 2)}\n`)
   }
 
+  async function handleSync() {
+    if (!pathFile || syncBusy) return
+    setSyncBusy(true)
+    setSyncStatus(null)
+    const base = syncUrl.replace(/\/+$/, "")
+    try {
+      const infoRes = await fetch(`${base}/info`)
+      if (!infoRes.ok) throw new Error(`server replied ${infoRes.status}`)
+      const info = (await infoRes.json()) as {
+        language?: CodeLang
+        target?: string
+      }
+      if (info.language !== "java" && info.language !== "kotlin") {
+        throw new Error("server did not report a known language")
+      }
+      const code = buildPathCode(pathFile, info.language)
+      const syncRes = await fetch(`${base}/sync`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ language: info.language, code }),
+      })
+      const result = (await syncRes.json()) as {
+        ok: boolean
+        replaced?: boolean
+        error?: string
+        hint?: string
+      }
+      if (!result.ok) {
+        throw new Error(
+          result.hint
+            ? `${result.error || "sync failed"}. ${result.hint}`
+            : result.error || "sync failed"
+        )
+      }
+      const summary = result.replaced ? "synced path block" : "sync completed"
+      setSyncStatus({ kind: "ok", text: summary })
+    } catch (e) {
+      setSyncStatus({
+        kind: "err",
+        text: e instanceof Error ? e.message : "sync failed",
+      })
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
   function exportAsCode(language: "java" | "kotlin") {
     if (!pathFile) return
     const code = buildPathCode(pathFile, language)
@@ -2268,6 +2389,81 @@ export function App() {
                   </label>
                 </Button>
               </Tip>
+              <div className="relative" ref={syncMenuRef}>
+                <Tip label={`Sync to ${syncUrl}`}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setSyncMenuOpen((v) => !v)}
+                    disabled={!pathFile}
+                  >
+                    <RiRefreshLine
+                      className={syncBusy ? "animate-spin" : undefined}
+                    />
+                    Sync
+                    <RiArrowDownSLine />
+                  </Button>
+                </Tip>
+                {syncMenuOpen ? (
+                  <div className="absolute top-full right-0 z-[100] mt-1 w-[280px] space-y-2 border bg-popover p-2 shadow-md">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-[10px] tracking-wide text-muted-foreground uppercase">
+                        Sync server
+                      </label>
+                      <div
+                        aria-live="polite"
+                        className={cn(
+                          "inline-flex h-6 items-center border px-2 text-[11px] font-medium",
+                          syncIndicator.className
+                        )}
+                      >
+                        {syncIndicator.label}
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      className="h-8 w-full border bg-background px-2 text-sm outline-none focus:border-primary"
+                      value={syncUrl}
+                      onChange={(e) => setSyncUrl(e.target.value)}
+                      placeholder="http://localhost:7777"
+                    />
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      onClick={async () => {
+                        setSyncMenuOpen(false)
+                        await handleSync()
+                      }}
+                      disabled={!pathFile || syncBusy}
+                    >
+                      <RiRefreshLine
+                        className={syncBusy ? "animate-spin" : undefined}
+                      />
+                      Sync now
+                    </Button>
+                    <p className="text-[11px] leading-snug text-muted-foreground">
+                      Run{" "}
+                      <code className="bg-muted px-1">
+                        bun run sync &lt;file&gt;
+                      </code>{" "}
+                      in your robot codebase, add{" "}
+                      <code className="bg-muted px-1">
+                        // VISUALIZER_PATH_BEGIN / // VISUALIZER_PATH_END
+                      </code>{" "}
+                      markers around your whole{" "}
+                      <code className="bg-muted px-1">Paths</code>{" "}
+                      companion/static block, then click Sync now.
+                    </p>
+                    {syncStatus ? (
+                      <p
+                        className={`text-xs ${syncStatus.kind === "ok" ? "text-emerald-500" : "text-destructive"}`}
+                      >
+                        {syncStatus.text}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
               <div className="relative" ref={exportMenuRef}>
                 <Tip label="Export the current path">
                   <Button
@@ -2281,7 +2477,7 @@ export function App() {
                   </Button>
                 </Tip>
                 {exportMenuOpen ? (
-                  <div className="absolute right-0 top-full z-[100] mt-1 min-w-[180px] border bg-popover p-1 shadow-md">
+                  <div className="absolute top-full right-0 z-[100] mt-1 min-w-[180px] border bg-popover p-1 shadow-md">
                     <button
                       type="button"
                       className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm hover:bg-muted"
@@ -2294,7 +2490,7 @@ export function App() {
                       .pp file
                     </button>
                     <div className="my-1 h-px bg-border" />
-                    <div className="px-2 pb-1 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    <div className="px-2 pt-1 pb-1 text-[10px] tracking-wide text-muted-foreground uppercase">
                       As code
                     </div>
                     <button
@@ -2561,7 +2757,7 @@ export function App() {
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-2 border bg-background p-2">
-                    <div className="flex min-w-0 flex-wrap items-center gap-2 flex-1">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                       <Tip
                         label={
                           mode === "place"
@@ -2583,7 +2779,13 @@ export function App() {
                           {mode === "place" ? "Placing point" : "Add point"}
                         </Button>
                       </Tip>
-                      <Tip label={isPlaying ? "Pause playback" : "Play the path animation"}>
+                      <Tip
+                        label={
+                          isPlaying
+                            ? "Pause playback"
+                            : "Play the path animation"
+                        }
+                      >
                         <Button
                           variant={isPlaying ? "default" : "outline"}
                           size="sm"
@@ -2616,7 +2818,13 @@ export function App() {
                       </Tip>
                     </div>
                     <div className="flex shrink-0 items-center justify-center gap-2">
-                      <Tip label={showRobot ? "Hide the robot footprint" : "Show the robot footprint"}>
+                      <Tip
+                        label={
+                          showRobot
+                            ? "Hide the robot footprint"
+                            : "Show the robot footprint"
+                        }
+                      >
                         <button
                           className={`inline-flex h-7 shrink-0 items-center justify-center border px-2.5 text-xs font-medium transition-colors ${
                             showRobot
@@ -2629,7 +2837,13 @@ export function App() {
                           Robot
                         </button>
                       </Tip>
-                      <Tip label={showShapes ? "Hide field goals & shapes" : "Show field goals & shapes"}>
+                      <Tip
+                        label={
+                          showShapes
+                            ? "Hide field goals & shapes"
+                            : "Show field goals & shapes"
+                        }
+                      >
                         <button
                           className={`inline-flex h-7 shrink-0 items-center justify-center border px-2.5 text-xs font-medium transition-colors ${
                             showShapes
@@ -2643,7 +2857,7 @@ export function App() {
                         </button>
                       </Tip>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2 flex-1 justify-end">
+                    <div className="flex flex-1 shrink-0 items-center justify-end gap-2">
                       <div className="inline-flex h-7 shrink-0 items-center border bg-muted/40 p-0.5">
                         {PLAYBACK_SPEEDS.map((speed) => (
                           <Tip key={speed} label={`Playback speed ${speed}x`}>
@@ -3434,7 +3648,7 @@ export function App() {
                                 ...line,
                                 controlPoints: line.controlPoints.slice(0, -1),
                               }))
-                          }
+                            }
                             disabled={selectedLine.controlPoints.length === 0}
                           >
                             <RiSubtractLine />
