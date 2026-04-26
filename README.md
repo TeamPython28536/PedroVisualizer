@@ -23,6 +23,27 @@ bun run build
 
 Output goes to `dist/`.
 
+## Offline + install (PWA)
+
+This app is configured as a Progressive Web App so it can be installed and
+used when venue WiFi is bad.
+
+- Install it from your browser menu (**Install app** / **Add to Home Screen**).
+- After first load, core assets are cached (app shell, JS/CSS, field image,
+  robot image, icons, and fonts).
+- Navigation falls back to the cached app shell, so route reloads still work
+  offline.
+
+To test production PWA behavior locally:
+
+```
+bun run build
+bun run preview
+```
+
+Then open the preview URL once while online, and after that it should keep
+working without network.
+
 ## What it does
 
 - Loads and saves `.pp` files (the same JSON format the upstream visualizer

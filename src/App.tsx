@@ -1103,6 +1103,11 @@ export function App() {
     kind: "ok" | "err"
     text: string
   } | null>(null)
+  const [pwaNotice, setPwaNotice] = useState<
+    "offline-ready" | "update-ready" | null
+  >(null)
+  const [pwaUpdateBusy, setPwaUpdateBusy] = useState(false)
+  const [pwaUpdateError, setPwaUpdateError] = useState<string | null>(null)
   useEffect(() => {
     try {
       localStorage.setItem("visualizer.syncUrl", syncUrl)
@@ -1110,6 +1115,46 @@ export function App() {
       /* no storage */
     }
   }, [syncUrl])
+
+  useEffect(() => {
+    function handleOfflineReady() {
+      setPwaUpdateError(null)
+      setPwaNotice((current) =>
+        current === "update-ready" ? current : "offline-ready"
+      )
+    }
+
+    function handleUpdateReady() {
+      setPwaUpdateError(null)
+      setPwaNotice("update-ready")
+    }
+
+    window.addEventListener("visualizer:pwa-offline-ready", handleOfflineReady)
+    window.addEventListener("visualizer:pwa-update-ready", handleUpdateReady)
+
+    return () => {
+      window.removeEventListener(
+        "visualizer:pwa-offline-ready",
+        handleOfflineReady
+      )
+      window.removeEventListener(
+        "visualizer:pwa-update-ready",
+        handleUpdateReady
+      )
+    }
+  }, [])
+
+  useEffect(() => {
+    if (pwaNotice !== "offline-ready") {
+      return undefined
+    }
+
+    const timeout = window.setTimeout(() => {
+      setPwaNotice((current) => (current === "offline-ready" ? null : current))
+    }, 4500)
+
+    return () => window.clearTimeout(timeout)
+  }, [pwaNotice])
 
   const syncIndicator = useMemo(() => {
     if (syncBusy) {
@@ -2218,6 +2263,33 @@ export function App() {
     }
   }
 
+  async function applyPwaUpdate() {
+    if (pwaUpdateBusy) {
+      return
+    }
+
+    const update = window.__visualizerApplyPwaUpdate
+    if (!update) {
+      setPwaUpdateError(
+        "Update service is still starting. Try again in a moment."
+      )
+      return
+    }
+
+    setPwaUpdateBusy(true)
+    setPwaUpdateError(null)
+
+    try {
+      await update(true)
+    } catch (error) {
+      setPwaUpdateError(
+        error instanceof Error ? error.message : "Could not apply update."
+      )
+    } finally {
+      setPwaUpdateBusy(false)
+    }
+  }
+
   function exportAsCode(language: "java" | "kotlin") {
     if (!pathFile) return
     const code = buildPathCode(pathFile, language)
@@ -2521,6 +2593,51 @@ export function App() {
             </div>
           </div>
         </header>
+
+        {pwaNotice ? (
+          <div className="border-b bg-muted/30">
+            <div className="mx-auto flex max-w-[1680px] flex-wrap items-center gap-2 px-4 py-2 text-xs">
+              <span className="font-medium text-foreground">
+                {pwaNotice === "update-ready"
+                  ? "Update ready"
+                  : "Offline mode ready"}
+              </span>
+              <span className="text-muted-foreground">
+                {pwaNotice === "update-ready"
+                  ? "A newer version was downloaded while online."
+                  : "Core assets are cached for weak or missing WiFi."}
+              </span>
+              {pwaNotice === "update-ready" ? (
+                <>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => void applyPwaUpdate()}
+                    disabled={pwaUpdateBusy}
+                  >
+                    <RiRefreshLine
+                      className={pwaUpdateBusy ? "animate-spin" : undefined}
+                    />
+                    {pwaUpdateBusy ? "Updating..." : "Refresh now"}
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => {
+                      setPwaNotice(null)
+                      setPwaUpdateError(null)
+                    }}
+                  >
+                    Later
+                  </Button>
+                </>
+              ) : null}
+              {pwaUpdateError ? (
+                <span className="text-destructive">{pwaUpdateError}</span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         <main className="mx-auto grid max-w-[1680px] gap-4 p-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
           <aside className="min-w-0 space-y-4">
