@@ -377,17 +377,16 @@ function normalizeFile(file: PedroPathFile): PedroPathFile {
       Array.isArray(file.sequence) && file.sequence.length > 0
         ? file.sequence
         : lines.map((line) => ({ kind: "path", lineId: line.id })),
-    pathChains:
-      Array.isArray(file.pathChains) && file.pathChains.length > 0
-        ? file.pathChains
-        : [
-            {
-              id: createId("chain"),
-              name: "Main Chain",
-              color: DEFAULT_PATH_COLOR,
-              lineIds: lines.map((line) => line.id),
-            },
-          ],
+    pathChains: Array.isArray(file.pathChains)
+      ? file.pathChains
+      : [
+          {
+            id: createId("chain"),
+            name: "Main Chain",
+            color: DEFAULT_PATH_COLOR,
+            lineIds: lines.map((line) => line.id),
+          },
+        ],
     settings: file.settings ?? {},
     version: file.version ?? "1.2.1",
   }
@@ -2545,6 +2544,88 @@ export function App() {
     }))
   }
 
+  function deleteChain(chainId: string) {
+    if (!pathFile) {
+      return
+    }
+
+    const chain = pathFile.pathChains?.find(
+      (candidate) => candidate.id === chainId
+    )
+    if (!chain) {
+      return
+    }
+
+    const deletedLineIds = new Set(chain.lineIds)
+    const firstDeletedIndex = pathFile.lines.findIndex((line) =>
+      deletedLineIds.has(line.id)
+    )
+    const previewLines = pathFile.lines.filter(
+      (line) => !deletedLineIds.has(line.id)
+    )
+    const nextSelectedLineId =
+      selectedLineId && deletedLineIds.has(selectedLineId)
+        ? (previewLines[Math.min(firstDeletedIndex, previewLines.length - 1)]
+            ?.id ?? null)
+        : selectedLineId
+
+    updatePathFile((current) => {
+      const currentChain = current.pathChains?.find(
+        (candidate) => candidate.id === chainId
+      )
+      const lineIdsToDelete = new Set(currentChain?.lineIds ?? [])
+      const originalIndexById = new Map(
+        current.lines.map((line, index) => [line.id, index])
+      )
+      const lines = current.lines
+        .filter((line) => !lineIdsToDelete.has(line.id))
+        .map((line, index, keptLines) => {
+          const originalIndex = originalIndexById.get(line.id) ?? index
+          const previousOriginalLine = current.lines[originalIndex - 1]
+          const followsDeletedLine =
+            previousOriginalLine && lineIdsToDelete.has(previousOriginalLine.id)
+
+          if (index !== 0 && !followsDeletedLine) {
+            return line
+          }
+
+          const previousPoint =
+            index > 0 ? keptLines[index - 1]?.endPoint : current.startPoint
+          const startDeg = previousPoint?.endDeg ?? current.startPoint.endDeg ?? 0
+
+          return {
+            ...line,
+            endPoint: {
+              ...line.endPoint,
+              startDeg,
+            },
+          }
+        })
+
+      return {
+        ...current,
+        lines,
+        sequence: (current.sequence ?? []).filter(
+          (item) => !lineIdsToDelete.has(item.lineId ?? "")
+        ),
+        pathChains: (current.pathChains ?? [])
+          .filter((candidate) => candidate.id !== chainId)
+          .map((candidate) => ({
+            ...candidate,
+            lineIds: candidate.lineIds.filter(
+              (lineId) => !lineIdsToDelete.has(lineId)
+            ),
+          })),
+      }
+    })
+
+    setSelectedLineId(nextSelectedLineId)
+    setIsolatedChainId((current) => (current === chainId ? null : current))
+    setTransformSelection(null)
+    setPlaybackProgress(0)
+    setIsPlaying(false)
+  }
+
   function selectedStartPoint() {
     if (!pathFile || selectedLineIndex < 0) {
       return null
@@ -2970,6 +3051,20 @@ export function App() {
                           {chain.lineIds.length === 1 ? "" : "s"}
                         </p>
                         <div className="flex gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="destructive"
+                                size="icon-sm"
+                                onClick={() => deleteChain(chain.id)}
+                              >
+                                <RiDeleteBin6Line />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              Delete this chain and its paths
+                            </TooltipContent>
+                          </Tooltip>
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
