@@ -16,6 +16,7 @@ export default defineConfig({
         "decode.webp",
         "robot.png",
         "apple-touch-icon.png",
+        "social-card.png",
       ],
       manifest: {
         name: "Pedro Path Visualizer",
