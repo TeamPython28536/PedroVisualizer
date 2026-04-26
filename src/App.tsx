@@ -63,6 +63,8 @@ const CHAIN_COLORS = [
   "#0891B2",
   "#F97316",
 ]
+const SESSION_STORAGE_KEY = "visualizer.session.v1"
+const DEFAULT_SYNC_URL = "http://localhost:7777"
 
 type Point = {
   x: number
@@ -148,6 +150,23 @@ type TransformSelection = {
 }
 
 type ToolMode = "select" | "place"
+
+type SessionSnapshot = {
+  version: 1
+  savedAt: string
+  pathFile: PedroPathFile
+  fileName: string
+  selectedLineId: string | null
+  mode: ToolMode
+  showShapes: boolean
+  showRobot: boolean
+  playbackSpeed: number
+  isolatedChainId: string | null
+  snapToGrid: boolean
+  snapRange: number
+  snapAngle: number
+  syncUrl: string
+}
 
 type RouteSample = {
   point: Point
@@ -371,6 +390,67 @@ function normalizeFile(file: PedroPathFile): PedroPathFile {
           ],
     settings: file.settings ?? {},
     version: file.version ?? "1.2.1",
+  }
+}
+
+function isSessionSnapshot(value: unknown): value is SessionSnapshot {
+  if (!value || typeof value !== "object") {
+    return false
+  }
+
+  const candidate = value as Partial<SessionSnapshot>
+  return (
+    candidate.version === 1 &&
+    typeof candidate.savedAt === "string" &&
+    isPedroPathFile(candidate.pathFile) &&
+    typeof candidate.fileName === "string" &&
+    (candidate.selectedLineId === null ||
+      typeof candidate.selectedLineId === "string") &&
+    (candidate.mode === "select" || candidate.mode === "place") &&
+    typeof candidate.showShapes === "boolean" &&
+    typeof candidate.showRobot === "boolean" &&
+    typeof candidate.playbackSpeed === "number" &&
+    (candidate.isolatedChainId === null ||
+      typeof candidate.isolatedChainId === "string") &&
+    typeof candidate.snapToGrid === "boolean" &&
+    typeof candidate.snapRange === "number" &&
+    typeof candidate.snapAngle === "number" &&
+    typeof candidate.syncUrl === "string"
+  )
+}
+
+function readSessionSnapshot(): SessionSnapshot | null {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY)
+    if (!raw) {
+      return null
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!isSessionSnapshot(parsed)) {
+      localStorage.removeItem(SESSION_STORAGE_KEY)
+      return null
+    }
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeSessionSnapshot(snapshot: SessionSnapshot) {
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(snapshot))
+  } catch {
+    /* no storage */
+  }
+}
+
+function clearSessionSnapshot() {
+  try {
+    localStorage.removeItem(SESSION_STORAGE_KEY)
+  } catch {
+    /* no storage */
   }
 }
 
@@ -1091,11 +1171,9 @@ export function App() {
   const syncMenuRef = useRef<HTMLDivElement | null>(null)
   const [syncUrl, setSyncUrl] = useState<string>(() => {
     try {
-      return (
-        localStorage.getItem("visualizer.syncUrl") || "http://localhost:7777"
-      )
+      return localStorage.getItem("visualizer.syncUrl") || DEFAULT_SYNC_URL
     } catch {
-      return "http://localhost:7777"
+      return DEFAULT_SYNC_URL
     }
   })
   const [syncBusy, setSyncBusy] = useState(false)
@@ -1103,6 +1181,8 @@ export function App() {
     kind: "ok" | "err"
     text: string
   } | null>(null)
+  const [sessionRecovery, setSessionRecovery] =
+    useState<SessionSnapshot | null>(null)
   const [pwaNotice, setPwaNotice] = useState<
     "offline-ready" | "update-ready" | null
   >(null)
@@ -1156,6 +1236,13 @@ export function App() {
     return () => window.clearTimeout(timeout)
   }, [pwaNotice])
 
+  useEffect(() => {
+    const snapshot = readSessionSnapshot()
+    if (snapshot) {
+      setSessionRecovery(snapshot)
+    }
+  }, [])
+
   const syncIndicator = useMemo(() => {
     if (syncBusy) {
       return {
@@ -1204,6 +1291,7 @@ export function App() {
   const animationFrameRef = useRef<number | null>(null)
   const lastFrameRef = useRef<number | null>(null)
   const dragStartRef = useRef<{ point: Point; pointer: Point } | null>(null)
+  const hasInitializedSessionSaveRef = useRef(false)
 
   const selectedLineIndex = useMemo(() => {
     if (!pathFile || !selectedLineId) {
@@ -1353,6 +1441,24 @@ export function App() {
     }
   }, [pathFile])
 
+  const sessionRecoveryTimestamp = useMemo(() => {
+    if (!sessionRecovery) {
+      return null
+    }
+
+    const date = new Date(sessionRecovery.savedAt)
+    if (Number.isNaN(date.getTime())) {
+      return null
+    }
+
+    return date.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    })
+  }, [sessionRecovery])
+
   useEffect(() => {
     if (!isPlaying || routeSamples.totalDistance <= 0) {
       return undefined
@@ -1470,6 +1576,92 @@ export function App() {
     setPast([])
     setFuture([])
   }
+
+  function restoreSession(snapshot: SessionSnapshot) {
+    const normalized = normalizeFile(snapshot.pathFile)
+    const selectedExists = snapshot.selectedLineId
+      ? normalized.lines.some((line) => line.id === snapshot.selectedLineId)
+      : false
+    const clampedSpeed = PLAYBACK_SPEEDS.includes(
+      snapshot.playbackSpeed as (typeof PLAYBACK_SPEEDS)[number]
+    )
+      ? snapshot.playbackSpeed
+      : 1
+    const clampedSnapRange = Math.max(0.1, snapshot.snapRange)
+    const clampedSnapAngle = Math.max(1, snapshot.snapAngle)
+
+    replacePathFile(normalized)
+    setFileName(snapshot.fileName || "pedro-path.pp")
+    setSelectedLineId(selectedExists ? snapshot.selectedLineId : null)
+    setMode(snapshot.mode)
+    setShowShapes(snapshot.showShapes)
+    setShowRobot(snapshot.showRobot)
+    setPlaybackSpeed(clampedSpeed)
+    setIsolatedChainId(snapshot.isolatedChainId)
+    setSnapToGrid(snapshot.snapToGrid)
+    setSnapRange(clampedSnapRange)
+    setSnapAngle(clampedSnapAngle)
+    setSyncUrl(snapshot.syncUrl || DEFAULT_SYNC_URL)
+    setTransformSelection(null)
+    setDragTarget(null)
+    setPlaybackProgress(0)
+    setIsPlaying(false)
+    setHoverPoint(null)
+    setError(null)
+    setExportMenuOpen(false)
+    setSyncMenuOpen(false)
+    setSessionRecovery(null)
+    clearSessionSnapshot()
+  }
+
+  function dismissSessionRecovery() {
+    setSessionRecovery(null)
+    clearSessionSnapshot()
+  }
+
+  useEffect(() => {
+    if (!hasInitializedSessionSaveRef.current) {
+      hasInitializedSessionSaveRef.current = true
+      return
+    }
+
+    if (!pathFile) {
+      clearSessionSnapshot()
+      return
+    }
+
+    const snapshot: SessionSnapshot = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      pathFile,
+      fileName,
+      selectedLineId,
+      mode,
+      showShapes,
+      showRobot,
+      playbackSpeed,
+      isolatedChainId,
+      snapToGrid,
+      snapRange,
+      snapAngle,
+      syncUrl,
+    }
+
+    writeSessionSnapshot(snapshot)
+  }, [
+    fileName,
+    isolatedChainId,
+    mode,
+    pathFile,
+    playbackSpeed,
+    selectedLineId,
+    showRobot,
+    showShapes,
+    snapAngle,
+    snapRange,
+    snapToGrid,
+    syncUrl,
+  ])
 
   function undo() {
     setPathFile((current) => {
@@ -2635,6 +2827,35 @@ export function App() {
               {pwaUpdateError ? (
                 <span className="text-destructive">{pwaUpdateError}</span>
               ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {sessionRecovery ? (
+          <div className="border-b bg-amber-500/10">
+            <div className="mx-auto flex max-w-[1680px] flex-wrap items-center gap-2 px-4 py-2 text-xs">
+              <span className="font-medium text-foreground">
+                Restore last session?
+              </span>
+              <span className="text-muted-foreground">
+                {sessionRecoveryTimestamp
+                  ? `Saved ${sessionRecoveryTimestamp}.`
+                  : "Unsaved edits were detected from your last visit."}
+              </span>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => restoreSession(sessionRecovery)}
+              >
+                Restore
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={dismissSessionRecovery}
+              >
+                Discard
+              </Button>
             </div>
           </div>
         ) : null}
